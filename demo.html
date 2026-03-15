@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoEvolve — Watch AI Agents Evolve</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0f;color:#e0e0e0;font-family:'Courier New',monospace;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:20px}
+h1{font-size:2.5em;background:linear-gradient(135deg,#ff6b35,#8a2be2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin:20px 0}
+.sub{color:#888;margin-bottom:30px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;max-width:900px;width:100%;margin-bottom:20px}
+.card{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:20px}
+.card h3{color:#8a2be2;margin-bottom:10px;font-size:0.85em;text-transform:uppercase;letter-spacing:1px}
+.m{font-size:2.5em;font-weight:bold;color:#ff6b35}
+.ml{color:#555;font-size:0.8em;margin-top:5px}
+.bar{width:100%;height:6px;background:rgba(255,255,255,0.1);border-radius:3px;overflow:hidden;margin-top:10px}
+.fill{height:100%;background:linear-gradient(90deg,#ff6b35,#8a2be2);border-radius:3px;transition:width 0.3s}
+canvas{max-width:900px;width:100%;height:120px;margin:10px 0}
+button{background:linear-gradient(135deg,#ff6b35,#8a2be2);color:#fff;border:none;padding:10px 24px;border-radius:8px;font-size:1em;cursor:pointer;margin:5px;font-family:inherit}
+button:hover{opacity:0.9}
+#log{max-width:900px;width:100%;background:rgba(0,0,0,0.5);border-radius:12px;padding:15px;max-height:250px;overflow-y:auto;font-size:0.8em;line-height:1.5}
+.k{color:#10b981}.d{color:#ef4444}.i{color:#6b7280}.b{color:#f59e0b}
+.strat{font-size:0.9em;color:#aaa;line-height:1.8}
+</style>
+</head>
+<body>
+<h1>🧬 AutoEvolve</h1>
+<p class="sub">Watch AI agents evolve through experimentation — in real-time</p>
+<div class="grid">
+<div class="card"><h3>Cycles</h3><div class="m" id="c">0</div><div class="ml">experiments run</div><div class="bar"><div class="fill" id="p" style="width:0%"></div></div></div>
+<div class="card"><h3>Best Score</h3><div class="m" id="b">—</div><div class="ml">lower is better</div></div>
+<div class="card"><h3>Keep Rate</h3><div class="m" id="r">—</div><div class="ml">improvements kept</div></div>
+<div class="card"><h3>Strategy</h3><div class="strat" id="s">lr=0.01, depth=8, window=SSSL</div></div>
+</div>
+<canvas id="chart"></canvas>
+<button onclick="go()">▶ Start Evolution (50 cycles)</button>
+<button onclick="stop()">⏹ Stop</button>
+<div id="log"></div>
+<script>
+let on=false,cyc=0,kept=0,scores=[],best=1e9;
+let S={lr:.01,depth:8,win:'SSSL'};
+const pool={lr:[.005,.008,.01,.012,.015,.02,.025,.03],depth:[4,6,8,10,12,16],win:['SSSL','SSLL','SLSL','LLLL','SSSS']};
+
+function L(m,c='i'){const e=document.getElementById('log');e.innerHTML+=`<div class="${c}">[${new Date().toLocaleTimeString()}] ${m}</div>`;e.scrollTop=e.scrollHeight}
+
+function score(){
+  let b=1.0;
+  b-=S.depth*0.003;
+  b+=Math.abs(S.lr-0.015)*3;
+  b+=(Math.random()-0.45)*0.06;
+  return Math.max(0.85,b);
+}
+
+function mutate(){
+  const keys=['lr','depth','win'];
+  const k=keys[Math.floor(Math.random()*3)];
+  const o=S[k];
+  S[k]=pool[k][Math.floor(Math.random()*pool[k].length)];
+  return `${k}: ${o} → ${S[k]}`;
+}
+
+function draw(){
+  const cv=document.getElementById('chart'),ctx=cv.getContext('2d');
+  cv.width=cv.offsetWidth;cv.height=120;
+  if(scores.length<2)return;
+  ctx.clearRect(0,0,cv.width,cv.height);
+  const mn=Math.min(...scores)*0.98,mx=Math.max(...scores)*1.02;
+  const st=cv.width/(scores.length-1);
+  ctx.beginPath();ctx.strokeStyle='#8a2be2';ctx.lineWidth=2;
+  scores.forEach((s,i)=>{const x=i*st,y=cv.height-((s-mn)/(mx-mn))*cv.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});
+  ctx.stroke();
+  ctx.beginPath();ctx.strokeStyle='#ff6b35';ctx.setLineDash([5,5]);
+  const by=cv.height-((best-mn)/(mx-mn))*cv.height;
+  ctx.moveTo(0,by);ctx.lineTo(cv.width,by);ctx.stroke();ctx.setLineDash([]);
+}
+
+function step(){
+  if(!on||cyc>=50){if(cyc>=50)L('🎯 Complete! Best: '+best.toFixed(4),'b');return}
+  cyc++;
+  const ch=mutate(),sc=score();
+  const ok=sc<best;
+  if(ok){best=sc;kept++}
+  scores.push(sc);
+  L(`#${cyc} ${ch} → ${sc.toFixed(4)} ${ok?'✅ kept':'↩️ revert'}`,'k');
+  document.getElementById('c').textContent=cyc;
+  document.getElementById('b').textContent=best.toFixed(4);
+  document.getElementById('r').textContent=Math.round(kept/cyc*100)+'%';
+  document.getElementById('s').textContent=`lr=${S.lr}, depth=${S.depth}, win=${S.win}`;
+  document.getElementById('p').style.width=(cyc/50*100)+'%';
+  draw();
+  setTimeout(step,600+Math.random()*300);
+}
+
+function go(){if(on)return;on=true;cyc=0;kept=0;scores=[];best=1e9;L('🧬 Started','i');step()}
+function stop(){on=false;L('⏹ Stopped','i')}
+</script>
+</body>
+</html>
