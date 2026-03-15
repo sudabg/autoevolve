@@ -259,31 +259,56 @@ def quick_start(project_dir: str, modify_fn: Callable,
     config = AutoConfig(project_dir=project_dir, **kwargs)
     return Evolver(config)
 
-if __name__ == "__main__":
-    # Demo: 进化一个简单的策略文件
-    import tempfile
-    
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # 创建示例策略
-        Path(tmpdir, "strategy.md").write_text("# Strategy v1\nlr=0.01\n")
-        
-        # 创建示例运行脚本
-        Path(tmpdir, "run.sh").write_text('''#!/bin/bash
-# 模拟实验：输出随机分数
-echo "score: $(( RANDOM % 100 + 50 )).$(( RANDOM % 100 ))"
-''')
-        os.chmod(Path(tmpdir, "run.sh"), 0o755)
-        
-        config = AutoConfig(project_dir=tmpdir, time_budget=10)
+
+def cli_main():
+    """CLI entry point."""
+    import argparse, csv
+    parser = argparse.ArgumentParser(prog="autoevolve",
+        description="Let any AI agent autonomously evolve through experimentation")
+    sub = parser.add_subparsers(dest="command")
+
+    run_p = sub.add_parser("run", help="Run evolution cycles")
+    run_p.add_argument("--project", default=".")
+    run_p.add_argument("--command", required=True, help="Experiment command")
+    run_p.add_argument("--metric", default="score:", help="Metric extraction pattern")
+    run_p.add_argument("--cycles", type=int, default=1)
+    run_p.add_argument("--budget", type=int, default=300)
+    run_p.add_argument("--min-improvement", type=float, default=0.01)
+
+    res_p = sub.add_parser("results", help="Show results")
+    res_p.add_argument("--project", default=".")
+    res_p.add_argument("--last", type=int, default=10)
+
+    trend_p = sub.add_parser("trend", help="Show trend")
+    trend_p.add_argument("--project", default=".")
+    trend_p.add_argument("--last", type=int, default=5)
+
+    args = parser.parse_args()
+
+    if args.command == "run":
+        config = AutoConfig(project_dir=args.project, time_budget=args.budget,
+                           min_improvement=args.min_improvement)
         evolver = Evolver(config)
-        
-        def double_lr(strategy):
-            return strategy.replace("lr=0.01", "lr=0.02")
-        
-        # 运行 3 个周期
-        for _ in range(3):
-            result = evolver.step(double_lr, "bash run.sh", "score:")
-            print(f"Cycle {result['cycle']}: {result['status']} ({result['notes']})")
-        
-        print(f"\nTrend: {evolver.tracker.trend()}")
-        print(f"Results: {Path(tmpdir, 'results.tsv').read_text()}")
+        def no_op(s): return s
+        for _ in range(args.cycles):
+            r = evolver.step(no_op, args.command, args.metric)
+            icon = "✅" if r["status"] == "keep" else "❌" if r["status"] == "crash" else "↩️"
+            print(f"{icon} Cycle {r['cycle']}: {r['metric']:.4f} [{r['status']}] {r['notes']}")
+        print(f"\nTrend: {evolver.tracker.trend(args.last)}")
+
+    elif args.command == "results":
+        p = Path(args.project) / "results.tsv"
+        if not p.exists(): print("No results."); return
+        for line in p.read_text().strip().split('\n')[-args.last:]:
+            print(line)
+
+    elif args.command == "trend":
+        config = AutoConfig(project_dir=args.project)
+        t = Tracker(str(Path(args.project) / config.metrics_file))
+        print(f"Last: {t.last_score():.4f} | Trend: {t.trend(args.last)}")
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    cli_main()
