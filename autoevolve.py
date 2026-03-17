@@ -13,12 +13,12 @@
 7. 质量追踪（v0.1.2：趋势分析/自动调参）
 """
 from __future__ import annotations
-import json, os, time, subprocess, hashlib, statistics
+import json, os, time, subprocess, hashlib, statistics, math
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional, Callable, List, Dict
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 # ---------------------------------------------------------------------------
 # 1. 单一配置对象（类比 GPTConfig）
@@ -323,7 +323,103 @@ class QualityTracker:
         return suggestions
 
 # ---------------------------------------------------------------------------
-# 7. 主循环（类比 autoresearch 的 LOOP FOREVER）
+# 7. 策略记忆：Block Attention 加权选择（v0.1.3，灵感来自 AttnRes）
+# ---------------------------------------------------------------------------
+class StrategyMemory:
+    """对历史策略做注意力加权回顾，替代二元保留/回滚。
+    
+    灵感来自 MoonshotAI 的 Attention Residuals：
+    - 不是简单 keep/discard，而是对过去 N 个策略做加权组合
+    - 使用 Block 结构降低复杂度（O(N) 而非 O(N²)）
+    - 好策略的"特征"可以部分复用，不必全盘接受或全盘否定
+    """
+    
+    def __init__(self, block_size: int = 5, max_history: int = 50):
+        self.block_size = block_size
+        self.max_history = max_history
+        self.history: List[Dict] = []  # {strategy_hash, metric, content, cycle}
+    
+    def record(self, cycle: int, strategy: str, metric: float):
+        """记录一次策略尝试。"""
+        h = hashlib.md5(strategy.encode()).hexdigest()[:8]
+        self.history.append({
+            "cycle": cycle,
+            "hash": h,
+            "metric": metric,
+            "content": strategy,
+        })
+        if len(self.history) > self.max_history:
+            self.history = self.history[-self.max_history:]
+    
+    def block_weights(self) -> List[float]:
+        """计算 Block Attention 权重。
+        
+        将历史分成 blocks（每 block_size 个），block 内取最高分，
+        block 间按分数做 softmax 加权。
+        """
+        if not self.history:
+            return []
+        
+        n = len(self.history)
+        blocks = []
+        for i in range(0, n, self.block_size):
+            block = self.history[i:i + self.block_size]
+            best_metric = max(e["metric"] for e in block)
+            blocks.append(best_metric)
+        
+        # Softmax over block scores
+        if not blocks:
+            return []
+        max_b = max(blocks)
+        exps = [math.exp(b - max_b) for b in blocks]
+        total = sum(exps)
+        return [e / total for e in exps]
+    
+    def weighted_strategy(self) -> Optional[str]:
+        """返回加权组合的历史最优策略片段。
+        
+        不是返回单一策略，而是从每个 block 中提取最高分策略的特征行，
+        按 block 权重排序，供 modify_fn 参考。
+        """
+        if len(self.history) < self.block_size:
+            return None
+        
+        weights = self.block_weights()
+        if not weights:
+            return None
+        
+        # 收集每个 block 的最佳策略内容
+        block_best = []
+        for i in range(0, len(self.history), self.block_size):
+            block = self.history[i:i + self.block_size]
+            best = max(block, key=lambda e: e["metric"])
+            block_idx = len(block_best)
+            if block_idx < len(weights):
+                block_best.append((weights[block_idx], best))
+        
+        # 按权重排序，返回 top 策略内容
+        block_best.sort(key=lambda x: x[0], reverse=True)
+        parts = []
+        for weight, entry in block_best[:3]:  # top 3 blocks
+            parts.append(f"[w={weight:.2f}] {entry['content'][:200]}")
+        
+        return "\n---\n".join(parts) if parts else None
+    
+    def top_strategies(self, n: int = 3) -> List[Dict]:
+        """返回历史 Top N 策略（按 metric 降序）。"""
+        sorted_h = sorted(self.history, key=lambda e: e["metric"], reverse=True)
+        seen = set()
+        result = []
+        for entry in sorted_h:
+            if entry["hash"] not in seen:
+                seen.add(entry["hash"])
+                result.append(entry)
+            if len(result) >= n:
+                break
+        return result
+
+# ---------------------------------------------------------------------------
+# 8. 主循环（类比 autoresearch 的 LOOP FOREVER）
 # ---------------------------------------------------------------------------
 class Evolver:
     """进化主引擎。连接所有模块。"""
@@ -335,6 +431,7 @@ class Evolver:
         self.rollback = Rollback(config.project_dir, config.strategy_file)
         self.health = HealthMonitor(config)
         self.quality = QualityTracker(window=config.quality_window)
+        self.memory = StrategyMemory(block_size=5)
         self.cycle = 0
         self.crash_streak = 0
     
@@ -398,7 +495,10 @@ class Evolver:
         
         self.tracker.record(self.cycle, "modified", metric, status, notes)
         
-        # 7. 自动调参（v0.1.2）
+        # 7. 策略记忆（v0.1.3）：记录到 Block Attention 内存
+        self.memory.record(self.cycle, new_strategy, metric)
+        
+        # 8. 自动调参（v0.1.2）
         if self.config.auto_adapt and self.cycle % self.config.quality_window == 0:
             suggestions = self.quality.suggest_params(self.config)
             if suggestions.get("min_improvement"):
@@ -444,6 +544,7 @@ class Evolver:
     
     def status(self) -> dict:
         """获取完整状态摘要。"""
+        top = self.memory.top_strategies(3)
         return {
             "version": __version__,
             "cycle": self.cycle,
@@ -459,6 +560,11 @@ class Evolver:
                 "trend": self.tracker.trend(),
                 "kept": self.tracker.kept_count(),
                 "total_scores": len(self.tracker.all_scores()),
+            },
+            "memory": {
+                "size": len(self.memory.history),
+                "top_strategy_metric": top[0]["metric"] if top else None,
+                "block_weights": [round(w, 3) for w in self.memory.block_weights()[-5:]],
             }
         }
 
@@ -499,6 +605,9 @@ def cli_main():
 
     health_p = sub.add_parser("health", help="Show health status")
     health_p.add_argument("--project", default=".")
+
+    mem_p = sub.add_parser("memory", help="Show strategy memory (Block Attention)")
+    mem_p.add_argument("--project", default=".")
 
     args = parser.parse_args()
 
@@ -554,6 +663,25 @@ def cli_main():
             print(f"   💡 Suggestion: {suggestion}")
         else:
             print(f"   ✅ Health: OK")
+
+    elif args.command == "memory":
+        config = AutoConfig(project_dir=args.project)
+        t = Tracker(str(Path(args.project) / config.metrics_file))
+        mem = StrategyMemory(block_size=5)
+        # Rebuild memory from results.tsv
+        for i, s in enumerate(t.all_scores()):
+            mem.record(i + 1, "reconstructed", s)
+        weights = mem.block_weights()
+        print(f"🧠 Strategy Memory v{__version__}")
+        print(f"   History: {len(mem.history)} entries")
+        print(f"   Blocks: {len(weights)}")
+        print(f"   Block Weights (recent): {[round(w, 3) for w in weights[-5:]]}")
+        top = mem.top_strategies(3)
+        for i, entry in enumerate(top):
+            print(f"   #{i+1}: metric={entry['metric']:.4f} cycle={entry['cycle']}")
+        weighted = mem.weighted_strategy()
+        if weighted:
+            print(f"\n   📝 Weighted Strategy Preview:\n{weighted[:300]}")
 
     else:
         parser.print_help()
