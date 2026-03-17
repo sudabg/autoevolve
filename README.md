@@ -138,3 +138,60 @@ MIT
 ## Acknowledgments
 
 Built with lessons from [Karpathy's autoresearch](https://github.com/karpathy/autoresearch). Thank you for showing the way.
+
+## 🎮 Live Demo
+
+[AutoEvolve Interactive Demo](https://presence-childrens-favorites-limited.trycloudflare.com)
+
+Watch AI agents evolve through experimentation in real-time. Click "Start Evolution" and observe 50 autonomous experiment cycles.
+
+## What's New in v0.1.2
+
+### Health Monitor
+Built-in health monitoring tracks crash streaks, stall detection, and cycle performance:
+```python
+evolver = Evolver(config)
+result = evolver.step(modify_fn, "python train.py")
+print(evolver.health.report())
+# {'uptime_sec': 45, 'total_cycles': 10, 'total_crashes': 1, 'stall_count': 0, ...}
+```
+
+### Quality Tracker
+Tracks improvement trends and auto-adjusts parameters:
+```python
+print(evolver.quality.quality_score())  # 0-1 quality metric
+print(evolver.quality.improvement_trend())  # accelerating/decelerating/stable
+```
+
+### Run Forever
+Loop until stalled or crash limit, with auto-stop:
+```python
+results = evolver.run_forever(modify_fn, "python train.py", max_cycles=100)
+```
+
+### Enhanced CLI
+```bash
+autoevolve run --command "python train.py" --forever --cycles 50
+autoevolve health --project ./my_project
+autoevolve trend --project ./my_project --last 10
+```
+
+### Status API
+Get complete evolution state as JSON:
+```python
+status = evolver.status()
+# {'version': '0.1.2', 'cycle': 10, 'health': {...}, 'quality': {...}, 'tracker': {...}}
+```
+
+## Architecture
+
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│  Evolver    │────▶│  Experiment  │────▶│  Tracker    │
+│  (主引擎)    │     │  (改→跑→测)   │     │  (记录趋势)  │
+└──────┬──────┘     └──────────────┘     └─────────────┘
+       │
+       ├──▶ HealthMonitor   (崩溃/停滞/资源)
+       ├──▶ QualityTracker  (改进幅度/质量分)
+       └──▶ Rollback        (快照/回滚)
+```
